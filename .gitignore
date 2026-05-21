@@ -1,0 +1,23 @@
+# ===== IDE 配置 =====
+.idea/
+.vscode/
+
+# ===== Python 运行时 =====
+__pycache__/
+*.pyc
+*.pyo
+
+# ===== Defects4J 下载的 buggy 项目源码（体积大，运行时生成） =====
+bugs/
+
+# ===== 程序运行时生成的目录 =====
+initial/
+chatrepair/
+initialchat/
+Results/
+
+# ===== 日志 =====
+logs.txt
+
+# ===== 环境变量 =====
+.env
