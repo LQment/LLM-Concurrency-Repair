@@ -19,10 +19,9 @@ import difflib
 import sys
 import time
 
-import openai
+import shutil
+from openai import OpenAI
 import subprocess
-from javalang import parse
-from javalang.tree import MethodDeclaration
 from constants import *
 
 # 全局变量：记录上一轮的失败测试全名
@@ -34,9 +33,12 @@ previous_failure_test = ''
 # 模式一：initial-save — 为所有 bug 预生成初始 prompt 并保存到文件
 # 方便后续人工检查或复用
 # ============================================================
-def save_initial(project, all_single_function_flag):
-    """遍历项目 patches/ 下的所有 JSON 文件，生成初始 prompt 并写入 initial/ 目录"""
+def save_initial(project, all_single_function_flag, bug_no=None):
+    """遍历项目 patches/ 下的 JSON 文件，生成初始 prompt 并写入 initial/ 目录。
+       若指定 bug_no（如 '1'），则只处理该 bug 的 JSON 文件。"""
     files = os.listdir(os.path.join(PATCH_JSON_FOLDER, project))
+    if bug_no is not None:
+        files = [f for f in files if f.rstrip('.json') == bug_no]
     for file in files:
         initial_prompt = ''
         if all_single_function_flag == True:
@@ -54,11 +56,13 @@ def save_initial(project, all_single_function_flag):
 # 流程：发送 prompt → 拿到回复 → 编译+测试验证 → 记录结果 → 下一个 bug
 # 没有反馈循环（不管结果是成功还是失败，都不会把错误信息发给 LLM 重试）
 # ============================================================
-def chat_initial(project, all_single_function_flag):
-    """对每个 bug 发送初始 prompt，LLM 一次回复后直接验证并记录结果到 initialchat/"""
-    openai.base_url = BASE_URL
-    openai.api_key = API_KEY
+def chat_initial(project, all_single_function_flag, bug_no=None):
+    """对每个 bug 发送初始 prompt，LLM 一次回复后直接验证并记录结果到 initialchat/。
+       若指定 bug_no（如 '1'），则只处理该 bug。"""
+    client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
     json_files = os.listdir(os.path.join(PATCH_JSON_FOLDER, project))
+    if bug_no is not None:
+        json_files = [f for f in json_files if f.rstrip('.json') == bug_no]
     for json_file in json_files:
         i = 0
         no = json_file.rstrip('.json')
@@ -71,7 +75,7 @@ def chat_initial(project, all_single_function_flag):
             if not initial_prompt == '':
                 # 构造对话上下文（只有 user ↔ assistant 两轮）
                 context = [{'role': 'user', 'content': initial_prompt}]
-                response = openai.chat.completions.create(model=MODEL, messages=context)
+                response = client.chat.completions.create(model=MODEL, messages=context)
                 # 暂停 1 秒防止请求频率过高
                 time.sleep(1)
                 response_text = response.choices[0].message.content
@@ -113,10 +117,9 @@ def chat_initial(project, all_single_function_flag):
 def diff_buggy_and_new(project, json_file, new_function):
     """对比 buggy 函数和 LLM 生成的新函数，返回 diff 字符串"""
     no = json_file.rstrip('.json')
-    with open(os.path.join(PATCH_JSON_FOLDER, project, json_file), 'r', encoding="latin-1") as f:
+    with open(os.path.join(PATCH_JSON_FOLDER, project, json_file), 'r', encoding="utf-8") as f:
         data = json.load(f)
         f.close()
-    # 如果本地还没有该 bug 的源码，先 checkout
     if not os.path.exists(os.path.join(BUGGY_PROJECT_FOLDER, project + no)):
         os.system(DEFECTS4J_CHECKOUT % (project, no + 'b', os.path.join(BUGGY_PROJECT_FOLDER, project + no)))
     next_line_no = data['0']['next_line_no']
@@ -136,7 +139,7 @@ def diff_buggy_and_new(project, json_file, new_function):
 def diff_buggy_and_newlist(project, json_file, new_function_list):
     """对多个 plausible patch 分别生成 diff 文本列表"""
     no = json_file.rstrip('.json')
-    with open(os.path.join(PATCH_JSON_FOLDER, project, json_file), 'r', encoding="latin-1") as f:
+    with open(os.path.join(PATCH_JSON_FOLDER, project, json_file), 'r', encoding="utf-8") as f:
         data = json.load(f)
         f.close()
     if not os.path.exists(os.path.join(BUGGY_PROJECT_FOLDER, project + no)):
@@ -157,13 +160,20 @@ def diff_buggy_and_newlist(project, json_file, new_function_list):
 # ============================================================
 # 模式三的入口：go_chat_repair — 遍历项目所有 bug，逐个调用 chat_repair
 # ============================================================
-def go_chat_repair(project, all_single_function_flag):
-    """遍历项目中的所有 bug，逐一执行 chat_repair 多轮修复流程"""
-    openai.base_url = BASE_URL
-    openai.api_key = API_KEY
+def go_chat_repair(project, all_single_function_flag, bug_no=None):
+    """遍历项目中的所有 bug，逐一执行 chat_repair 多轮修复流程。
+       若指定 bug_no（如 '1'），则只处理该 bug。"""
+    client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
     files = os.listdir(os.path.join(PATCH_JSON_FOLDER, project))
+    if bug_no is not None:
+        files = [f for f in files if f.rstrip('.json') == bug_no]
+    if len(files) == 0:
+        print("No bugs to process. Available bugs in patches/" + project + "/: " + ", ".join(sorted([f.rstrip('.json') for f in os.listdir(os.path.join(PATCH_JSON_FOLDER, project))])))
+        return
     i = 0
     while i < len(files):
+        bug_name = files[i].rstrip('.json')
+        print(f"[{project}-{bug_name}] Constructing prompt...")
         initial_prompt = ''
         if all_single_function_flag == True:
             initial_prompt = construct_single_function_initial_prompt(project, files[i])
@@ -171,8 +181,10 @@ def go_chat_repair(project, all_single_function_flag):
             initial_prompt = construct_initial_prompt(project, files[i])
         # 跳过不符合要求的 bug（如 multi-hunk 的 bug，prompt 为空）
         if initial_prompt == '':
+            print(f"[{project}-{bug_name}] Skipped (empty prompt)")
             i += 1
         if not initial_prompt == '':
+            print(f"[{project}-{bug_name}] Starting chatrepair (max {Max_Tries} tries)...")
             # chat_repair 抛出异常时不跳过当前 bug，保留 i 以便重试
             if chat_repair(project, initial_prompt, files[i], all_single_function_flag) != 'Exception':
                 i += 1
@@ -203,8 +215,7 @@ def chat_repair(project, initial_prompt, json_file, all_single_function_flag):
     current_tries = 0       # 当前总尝试次数（跨阶段累计）
     plausible_patches = []  # 已找到的 plausible（通过测试的）补丁列表
 
-    openai.base_url = BASE_URL
-    openai.api_key = API_KEY
+    client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
 
     # 反馈统计变量
     fa = 0  # 连续相同反馈的次数
@@ -221,8 +232,9 @@ def chat_repair(project, initial_prompt, json_file, all_single_function_flag):
         feedback_list = [] # 记录每次验证的反馈编码（用于统计）
 
         while current_length < Max_Conv_len:
+            print(f"  [Try {current_tries+1}/{Max_Tries}] Calling LLM...")
             context.append({'role': 'user', 'content': prompt})
-            response = openai.chat.completions.create(model=MODEL, messages=context)
+            response = client.chat.completions.create(model=MODEL, messages=context)
             # 暂停 1 秒防止请求频率过高
             time.sleep(1)
             response_text = response.choices[0].message.content
@@ -232,8 +244,11 @@ def chat_repair(project, initial_prompt, json_file, all_single_function_flag):
             patch = match_patch_code(response_text)
             # 格式不符合预期 → 跳出当前 dialogue，开始新一轮
             if patch == '':
+                print(f"  [Try {current_tries+1}/{Max_Tries}] No code extracted, retrying...")
+                current_tries += 1
                 break
 
+            print(f"  [Try {current_tries+1}/{Max_Tries}] Validating patch...")
             # 验证补丁：写入 Java 文件 → 编译 → 跑测试 → 返回反馈
             feedback = validate_patch(patch, project, json_file, all_single_function_flag, feedback_list)
             if feedback == '':
@@ -296,7 +311,7 @@ def chat_repair(project, initial_prompt, json_file, all_single_function_flag):
             else:
                 prompt = delete_substring_to_end(initial_prompt.split('<Example end>')[1].strip(), "Please provide") + Alt_Instruct_1 + patches_prompt + Alt_Instruct_2
             context.append({'role': 'user', 'content': prompt})
-            response = openai.chat.completions.create(model=MODEL, messages=context)
+            response = client.chat.completions.create(model=MODEL, messages=context)
             time.sleep(1)
             response_text = response.choices[0].message.content
             context.append({'role': 'assistant', 'content': response_text})
@@ -392,7 +407,7 @@ def validate_patch(patch, project, json_file, all_single_function_flag, fb_list)
             project, no + 'b', os.path.join(BUGGY_PROJECT_FOLDER, project + no)))
 
     # 读取补丁元数据（文件名、行号、补丁类型）
-    with open(os.path.join(PATCH_JSON_FOLDER, project, json_file), 'r', encoding="latin-1") as f:
+    with open(os.path.join(PATCH_JSON_FOLDER, project, json_file), 'r', encoding="utf-8") as f:
         data = json.load(f)
         f.close()
 
@@ -403,7 +418,7 @@ def validate_patch(patch, project, json_file, all_single_function_flag, fb_list)
     javafile_path = os.path.join(BUGGY_PROJECT_FOLDER, project + no, file_name)
 
     # ======== 备份原始 Java 文件（验证完后必须恢复） ========
-    with open(javafile_path, mode='r', encoding='latin-1') as javafile:
+    with open(javafile_path, mode='r', encoding='utf-8') as javafile:
         temp_javafile = javafile.read()
         javafile.close
 
@@ -415,23 +430,23 @@ def validate_patch(patch, project, json_file, all_single_function_flag, fb_list)
             to_line_no = data['0']['to_line_no']
             if from_line_no == to_line_no:
                 single_line = True  # 单行替换
-            with open(javafile_path, mode='r', encoding='latin-1') as f1:
+            with open(javafile_path, mode='r', encoding='utf-8') as f1:
                 lines = f1.readlines()
             del lines[from_line_no - 1:to_line_no]       # 删除 buggy 行
             lines.insert(from_line_no - 1, patch)         # 插入 LLM 修复代码
             f1.close()
-            with open(javafile_path, mode='w', encoding='latin-1') as f2:
+            with open(javafile_path, mode='w', encoding='utf-8') as f2:
                 f2.writelines(lines)
             f2.close()
 
         # --- Insert 插入型：在 next_line_no 之前插入新代码 ---
         if patch_type == PATCH_TYPE_INSERT:
             next_line_no = data['0']['next_line_no']
-            with open(javafile_path, mode='r', encoding='latin-1') as f1:
+            with open(javafile_path, mode='r', encoding='utf-8') as f1:
                 lines = f1.readlines()
             lines.insert(next_line_no - 1, patch)
             f1.close()
-            with open(javafile_path, mode='w', encoding='latin-1') as f2:
+            with open(javafile_path, mode='w', encoding='utf-8') as f2:
                 f2.writelines(lines)
                 f2.close()
 
@@ -452,20 +467,20 @@ def validate_patch(patch, project, json_file, all_single_function_flag, fb_list)
     # ======== 恢复原始 Java 文件 ========
     if feedback == '':
         # 补丁通过！
-        with open(javafile_path, mode='w', encoding='latin-1') as javafile:
+        with open(javafile_path, mode='w', encoding='utf-8') as javafile:
             javafile.write(temp_javafile)
             javafile.close()
         return ''
 
     if feedback == 'Exception':
         # 异常
-        with open(javafile_path, mode='w', encoding='latin-1') as javafile:
+        with open(javafile_path, mode='w', encoding='utf-8') as javafile:
             javafile.write(temp_javafile)
             javafile.close()
         return feedback
 
     # 补丁失败：恢复文件，在反馈信息末尾追加对应的 prompt 结尾引导语
-    with open(javafile_path, mode='w', encoding='latin-1') as javafile:
+    with open(javafile_path, mode='w', encoding='utf-8') as javafile:
         javafile.write(temp_javafile)
         javafile.close()
 
@@ -493,7 +508,7 @@ def rewrite_function_to_javafile(next_line_no, javafile_path, patch):
     """
     # 从 next_line_no 向上搜索，找到 method declaration 的行号
     start_line = get_method_declaration_line_no(javafile_path, next_line_no)
-    with open(javafile_path, "r", encoding='latin-1') as file:
+    with open(javafile_path, "r", encoding='utf-8') as file:
         lines = file.readlines()
         file.close()
     # 通过大括号计数找到函数的结束行（{ +1, } -1, 归零即结束）
@@ -510,7 +525,7 @@ def rewrite_function_to_javafile(next_line_no, javafile_path, patch):
     del lines[start_line - 1:end_line]
     lines.insert(start_line - 1, patch)
     file.close()
-    with open(javafile_path, mode='w', encoding='latin-1') as f2:
+    with open(javafile_path, mode='w', encoding='utf-8') as f2:
         f2.writelines(lines)
     f2.close()
 
@@ -537,11 +552,11 @@ def construct_feedback_after_validate(project, no, fb_list):
     """
     global previous_failure_test
 
-    failingtests_path = None
+    failingtests_path = os.path.join(BUGGY_PROJECT_FOLDER, project + no, FAILING_TEST_FILE)
     temp_failingtests = ""
 
     # ======== Step 1: 编译 ========
-    flag, stdout, stderr = run_command(DEFECTS4J_COMPILE.split(' '), 'latin-1', os.path.join(BUGGY_PROJECT_FOLDER, project + no), TEST_TIMEOUT_MAX_S)
+    flag, stdout, stderr = run_command(DEFECTS4J_COMPILE.split(' '), 'utf-8', os.path.join(BUGGY_PROJECT_FOLDER, project + no), TEST_TIMEOUT_MAX_S)
     if not flag:
         print(stderr)
     pattern = r"BUILD FAILED"
@@ -564,11 +579,10 @@ def construct_feedback_after_validate(project, no, fb_list):
     # ======== Step 2: 编译通过 → 运行测试 ========
     else:
         # 备份 failing_tests 文件（运行测试会覆盖它）
-        failingtests_path = os.path.join(BUGGY_PROJECT_FOLDER, project + no, FAILING_TEST_FILE)
-        with open(failingtests_path, mode='r', encoding='latin-1') as failingtests:
-            temp_failingtests = failingtests.read()
-            failingtests.close()
-        flag, stdout, stderr = run_command(DEFECTS4J_TEST.split(' '), 'latin-1', os.path.join(BUGGY_PROJECT_FOLDER, project + no), TEST_TIMEOUT_MAX_S)
+        if os.path.exists(failingtests_path):
+            with open(failingtests_path, mode='r', encoding='utf-8') as f:
+                temp_failingtests = f.read()
+        flag, stdout, stderr = run_command(DEFECTS4J_TEST.split(' '), 'utf-8', os.path.join(BUGGY_PROJECT_FOLDER, project + no), TEST_TIMEOUT_MAX_S)
 
         if not flag and stderr.count('[ERROR]') != 0:
             feedback = FeedBack_0 + FeedBack_4  # 测试超时
@@ -579,7 +593,7 @@ def construct_feedback_after_validate(project, no, fb_list):
             if is_file_empty_or_not_exists(failingtests_path):
                 # failing_tests 为空 = 所有测试通过！
                 fb_list.append(5)
-                with open(failingtests_path, mode='w', encoding='latin-1') as failingtests:
+                with open(failingtests_path, mode='w', encoding='utf-8') as failingtests:
                     failingtests.write(temp_failingtests)
                     failingtests.close()
                 return ''  # 返回空字符串 = 成功
@@ -592,7 +606,7 @@ def construct_feedback_after_validate(project, no, fb_list):
                 with open(LOG_FILE, 'a') as file:
                     file.write(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time())) + "\nWarning!!! Unable to handle file [" + failingtests_path + "] while validate the patch.")
                     file.close()
-                with open(failingtests_path, mode='w', encoding='latin-1') as failingtests:
+                with open(failingtests_path, mode='w', encoding='utf-8') as failingtests:
                     failingtests.write(temp_failingtests)
                     failingtests.close()
                 return 'Exception'
@@ -611,7 +625,7 @@ def construct_feedback_after_validate(project, no, fb_list):
                 fb_list.append(0)  # 新的测试失败
                 # 读取失败断言行内容，嵌入反馈
                 test_lines = []
-                with open(file, mode='r', encoding='latin-1') as test_file:
+                with open(file, mode='r', encoding='utf-8') as test_file:
                     lines = test_file.readlines()[test_line_no - 1:]
                     for line in lines:
                         test_lines.append(line)
@@ -621,7 +635,7 @@ def construct_feedback_after_validate(project, no, fb_list):
                     test_lines) + Failure_Test_error + test_error
 
         # 恢复 failing_tests 文件（备份还原）
-        with open(failingtests_path, mode='w', encoding='latin-1') as failingtests:
+        with open(failingtests_path, mode='w', encoding='utf-8') as failingtests:
             failingtests.write(temp_failingtests)
             failingtests.close()
 
@@ -716,19 +730,26 @@ def match_patch_code(response_text):
     matches = re.findall(r"```java\s*(.*?)```", response_text, re.DOTALL)
     if matches:
         patch = matches[0]
-    else:
-        # 策略 2：fallback 匹配普通 ``` ... ``` 格式
-        matches = re.findall(r"```\s*(.*?)```", response_text, re.DOTALL)
-        if not matches:
-            return ''
+        patch = patch.strip()
+        patch = re.sub(r"```+", "", patch)
+        patch = re.sub(r"^\s*java\s*", "", patch)
+        return patch.strip()
+
+    # 策略 2：fallback 匹配普通 ``` ... ``` 格式
+    matches = re.findall(r"```\s*(.*?)```", response_text, re.DOTALL)
+    if matches:
         patch = matches[0]
+        patch = patch.strip()
+        patch = re.sub(r"```+", "", patch)
+        return patch.strip()
 
-    # 清洗内容
-    patch = patch.strip()
-    patch = re.sub(r"```+", "", patch)   # 去掉残留的 ```
-    patch = re.sub(r"^\s*java\s*", "", patch)  # 去掉模型偶尔输出的 java 前缀
-
-    return patch.strip()
+    # 策略 3：无 markdown，从回复中提取 Java 代码
+    # 查找第一个 Java 特征行，从那里取到末尾
+    lines = response_text.split('\n')
+    for i, line in enumerate(lines):
+        if re.search(r'^\s*(public|private|protected|class\s|@Override|import\s|package\s|return\s|if\s*\(|for\s*\(|while\s*\(|try\s*\{|catch\s*\(|throw\s|/\*\*|//)', line):
+            return '\n'.join(lines[i:]).strip()
+    return ''
 
 
 # ============================================================
@@ -764,6 +785,14 @@ def delete_substring_to_end(s, subs):
 # ============================================================
 # 系统命令执行：封装 subprocess.run
 # ============================================================
+def _safe_decode(data, encoding='utf-8'):
+    """安全解码字节数据，UTF-8 失败时回退到 latin-1"""
+    try:
+        return data.decode(encoding)
+    except (UnicodeDecodeError, LookupError):
+        return data.decode('latin-1')
+
+
 def run_command(cmd, encoding='utf-8', cwd=None, timeout=None):
     """
     执行系统命令。
@@ -774,11 +803,22 @@ def run_command(cmd, encoding='utf-8', cwd=None, timeout=None):
     try:
         finished = subprocess.run(cmd, capture_output=True, cwd=cwd, timeout=timeout)
         finished.check_returncode()
-        return True, finished.stdout.decode(encoding), finished.stderr.decode(encoding)
+        return True, _safe_decode(finished.stdout, encoding), _safe_decode(finished.stderr, encoding)
     except subprocess.CalledProcessError:
-        return False, finished.stdout.decode(encoding), finished.stderr.decode(encoding)
+        return False, _safe_decode(finished.stdout, encoding), _safe_decode(finished.stderr, encoding)
     except subprocess.TimeoutExpired:
         return False, '[ERROR]:{} time out after {} seconds'.format(cmd, timeout), '[ERROR]:{} time out after {} seconds'.format(cmd, timeout)
+    except FileNotFoundError:
+        shell_cmd = ' '.join(cmd) if isinstance(cmd, list) else cmd
+        wsl_cmd = ['bash', '-c', shell_cmd]
+        try:
+            finished = subprocess.run(wsl_cmd, capture_output=True, cwd=cwd, timeout=timeout)
+            finished.check_returncode()
+            return True, _safe_decode(finished.stdout, encoding), _safe_decode(finished.stderr, encoding)
+        except subprocess.CalledProcessError:
+            return False, _safe_decode(finished.stdout, encoding), _safe_decode(finished.stderr, encoding)
+        except subprocess.TimeoutExpired:
+            return False, '[ERROR]:{} time out after {} seconds'.format(cmd, timeout), '[ERROR]:{} time out after {} seconds'.format(cmd, timeout)
 
 
 # ============================================================
@@ -827,15 +867,18 @@ def construct_initial_prompt(project, json_file):
     """
     global previous_failure_test
     no = json_file.rstrip('.json')
-    with open(os.path.join(PATCH_JSON_FOLDER, project, json_file), 'r', encoding="latin-1") as f:
+    with open(os.path.join(PATCH_JSON_FOLDER, project, json_file), 'r', encoding="utf-8") as f:
         data = json.load(f)
         f.close()
         num_of_hunks = data['num_of_hunks']
         # 只处理单块补丁，multi-hunk 暂不支持
         if num_of_hunks == 1:
-            if not os.path.exists(os.path.join(BUGGY_PROJECT_FOLDER, project + no)):
-                os.system(DEFECTS4J_CHECKOUT % (
-                    project, no + 'b', os.path.join(BUGGY_PROJECT_FOLDER, project + no)))
+            # 如果本地还没有该 bug 的源码，先 checkout
+            bug_dir = os.path.join(BUGGY_PROJECT_FOLDER, project + no)
+            if not os.path.exists(bug_dir):
+                os.system(DEFECTS4J_CHECKOUT % (project, no + 'b', bug_dir))
+            else:
+                run_command(['git', 'checkout', '--', '.'], cwd=bug_dir)
             file_name = data['0']['file_name']
             patch_type = data['0']['patch_type']
             # prompt 开头 = 角色 + Few-Shot 示例
@@ -909,16 +952,24 @@ def construct_single_function_initial_prompt(project, json_file):
     """
     global previous_failure_test
     no = json_file.rstrip('.json')
-    with open(os.path.join(PATCH_JSON_FOLDER, project, json_file), 'r', encoding="latin-1") as f:
+    with open(os.path.join(PATCH_JSON_FOLDER, project, json_file), 'r', encoding="utf-8") as f:
         data = json.load(f)
         f.close()
-    if not os.path.exists(os.path.join(BUGGY_PROJECT_FOLDER, project + no)):
-        os.system(DEFECTS4J_CHECKOUT % (project, no + 'b', os.path.join(BUGGY_PROJECT_FOLDER, project + no)))
+    # 如果本地还没有该 bug 的源码，先 checkout
+    bug_dir = os.path.join(BUGGY_PROJECT_FOLDER, project + no)
+    if not os.path.exists(bug_dir):
+        os.system(DEFECTS4J_CHECKOUT % (project, no + 'b', bug_dir))
+    else:
+        # 重置源文件修改（上次失败运行可能留下的脏代码），保留 Defects4J 元数据
+        run_command(['git', 'checkout', '--', '.'], cwd=bug_dir)
     # 角色设定 + 单函数版 Few-Shot 示例
     initial_prompt = INITIAL_APR_TOOL + INTIIAL_APR_EXAMPLE + get_example('Lang_single_function_example.txt')
     next_line_no = data['0']['next_line_no']
     file_name = data['0']['file_name']
     source_file_path = os.path.join(BUGGY_PROJECT_FOLDER, project + no, file_name)
+    if not os.path.exists(source_file_path):
+        print("ERROR: Source file not found: " + source_file_path)
+        return ''
     # 提取完整 buggy 函数
     buggy_function = get_buggy_function(source_file_path, next_line_no, next_line_no, PATCH_TYPE_DELETE)
     failure_info = prompt_add_failure_test_info(project, json_file)
@@ -950,16 +1001,18 @@ def prompt_add_failure_test_info(project, json_file):
     failure_test_path = os.path.join(BUGGY_PROJECT_FOLDER, project + no, FAILING_TEST_FILE)
     # 如果失败测试文件不存在或为空，先编译测试一次生成它
     if is_file_empty_or_not_exists(failure_test_path):
-        os.system('cd ' + os.path.join(BUGGY_PROJECT_FOLDER, project + no) + ' && ' + DEFECTS4J_COMPILE_TEST)
+        bug_dir = os.path.join(BUGGY_PROJECT_FOLDER, project + no)
+        run_command(DEFECTS4J_COMPILE.split(' '), 'utf-8', bug_dir, TEST_TIMEOUT_MAX_S)
+        run_command(DEFECTS4J_TEST.split(' '), 'utf-8', bug_dir, TEST_TIMEOUT_MAX_S)
 
     # 解析 failing_tests 文件
+    if is_file_empty_or_not_exists(failure_test_path):
+        print("Warning: failing_tests not generated for " + project + no + ", skipping failure info in prompt.")
+        return ''
     failure_test, test_error, test_file, test_line_no = get_failure_test_info(failure_test_path)
     if test_file == '' or test_line_no == '':
-        print("Wrong!!! Unable to handle file:[" + failure_test_path + '] while construct the initial prompt.')
-        with open(LOG_FILE, 'a') as file:
-            file.write(time.strftime('%Y-%m-%d %H:%M:%S',time.localtime(time.time()))+"\nWrong!!! Unable to handle file [" + failure_test_path + "] while construct the initial prompt.")
-            file.close()
-            return ''
+        print("Warning: Unable to parse failing_tests for " + project + no)
+        return ''
 
     # 更新全局变量：记录当前失败测试（用于后续判断是否新失败）
     previous_failure_test = failure_test
@@ -969,7 +1022,7 @@ def prompt_add_failure_test_info(project, json_file):
     if is_file_empty_or_not_exists(file):
         file = os.path.join(BUGGY_PROJECT_FOLDER, project + no, TEST_FILEPATH_PREFIX_1, test_file)
     test_lines = []
-    with open(file, mode='r', encoding='latin-1') as test_file:
+    with open(file, mode='r', encoding='utf-8') as test_file:
         lines = test_file.readlines()[test_line_no - 1:]
         for line in lines:
             test_lines.append(line)
@@ -1033,7 +1086,7 @@ def get_failure_test_info(test_file_path):
         (failing_test, test_error, test_file, test_line_no)
         如果解析失败，test_file 和 test_line_no 为 ''
     """
-    with open(test_file_path, 'r', encoding='latin-1') as file:
+    with open(test_file_path, 'r', encoding='utf-8') as file:
         lines = file.readlines()
         failing_test = lines[0].strip('--- ').rstrip()      # 第1行：测试方法全名
         test_error = lines[1].rstrip()                        # 第2行：错误信息
@@ -1094,7 +1147,7 @@ def get_method_lines(source_file_path, start_line_no):
 
     算法：扫描每一行，{ 计数 +1, } 计数 -1，归零即函数结束
     """
-    with open(source_file_path, "r", encoding='latin-1') as file:
+    with open(source_file_path, "r", encoding='utf-8') as file:
         lines = file.readlines()[start_line_no - 1:]
         file.close()
     left_open_brackets = 0
@@ -1136,7 +1189,16 @@ def get_example(example_file):
 #   python main.py initial-save Chart n →  对 Chart 项目以 single-line/hunk 模式生成初始 prompt
 # ============================================================
 if __name__ == '__main__':
-    ins, p, all = sys.argv[1:4]
+    args = sys.argv[1:]
+    if len(args) < 3:
+        print("Usage: python main.py <mode> <project> <y/n> [bug_no]")
+        print("  mode: initial-save | initial-chat | chatrepair")
+        print("  project: " + " | ".join(PROJECTS))
+        print("  y/n: y=single-function, n=single-line/hunk")
+        print("  bug_no: (optional) specific bug number, e.g. 1 or 10. Omit to run all.")
+        sys.exit(0)
+    ins, p, all = args[0:3]
+    bug_no = args[3] if len(args) > 3 else None
     if ins not in ["chatrepair", "initial-save", "initial-chat"]:
         print("Instruction only support \"chatrepair\"and\"initial-save\" and \"initial-chat\"")
     else:
@@ -1145,14 +1207,14 @@ if __name__ == '__main__':
             print(PROJECTS)
         else:
             if ins == "initial-save" and all == 'y':
-                save_initial(p, True)
+                save_initial(p, True, bug_no)
             elif ins == "initial-save" and all == 'n':
-                save_initial(p, False)
+                save_initial(p, False, bug_no)
             elif ins == "initial-chat" and all == 'y':
-                chat_initial(p, True)
+                chat_initial(p, True, bug_no)
             elif ins == "initial-chat" and all == 'n':
-                chat_initial(p, False)
+                chat_initial(p, False, bug_no)
             elif ins == "chatrepair" and all == 'y':
-                go_chat_repair(p, True)
+                go_chat_repair(p, True, bug_no)
             elif ins == "chatrepair" and all == 'n':
-                go_chat_repair(p, False)
+                go_chat_repair(p, False, bug_no)

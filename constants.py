@@ -84,9 +84,9 @@ Failure_Test_error = "with the following test error:\n"
 # ============================================================
 # Prompt 模板 — 结尾引导语（要求 LLM 返回 Java markdown 代码块）
 # ============================================================
-INITIAL_Single_line_final = "\nPlease provide an analysis of the problem and the expected behaviour of the correct fix, and the correct line at the infill location in the form of Java Markdown code block.\n"
-INITIAL_Single_hunk_final = "\nPlease provide an analysis of the problem and the expected behaviour of the correct fix, and the correct hunk at the infill location in the form of Java Markdown code block.\n"
-INITIAL_Single_function_final = "\nPlease provide an analysis of the problem and the expected behaviour of the correct fix, and the correct version of the function in the form of Java Markdown code block.\n"
+INITIAL_Single_line_final = "\nPlease provide an analysis of the problem and the expected behaviour of the correct fix, and then output the correct line of code. Return only the pure Java code without markdown code block formatting.\n"
+INITIAL_Single_hunk_final = "\nPlease provide an analysis of the problem and the expected behaviour of the correct fix, and then output the correct code. Return only the pure Java code without markdown code block formatting.\n"
+INITIAL_Single_function_final = "\nPlease provide an analysis of the problem and the expected behaviour of the correct fix, and then output the complete corrected function. Return only the pure Java code without markdown code block formatting.\n"
 
 # ============================================================
 # 反馈话术 — 根据验证结果分类
@@ -137,8 +137,21 @@ Max_Tries = 24        # 每个 bug 的最大总尝试次数（包含 initial rep
 Max_Conv_len = 3      # 单轮对话的最大轮次（到达后重新开始一轮新的 dialogue）
 
 # ============================================================
-# OpenAI API 配置
+# API 配置 — 从环境变量读取，避免密钥泄漏
+# 复制 .env.example 为 .env 并填入真实密钥，或直接设置环境变量：
+#   export CHATREPAIR_API_KEY="sk-xxx"
+#   export CHATREPAIR_MODEL="deepseek-v4-pro"
+#   export CHATREPAIR_BASE_URL="https://api.deepseek.com/v1"
 # ============================================================
-MODEL = "gpt-3.5-turbo"
-API_KEY = ''
-BASE_URL = ''
+import os
+
+# 尝试从 .env 文件加载（如果安装了 python-dotenv）
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+MODEL = os.environ.get("CHATREPAIR_MODEL", "deepseek-v4-pro")
+API_KEY = os.environ.get("CHATREPAIR_API_KEY", "")
+BASE_URL = os.environ.get("CHATREPAIR_BASE_URL", "https://api.deepseek.com/v1")
