@@ -148,7 +148,7 @@ import os
 # 尝试从 .env 文件加载（如果安装了 python-dotenv）
 try:
     from dotenv import load_dotenv
-    _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+    _env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env')
     load_dotenv(_env_path)
 except ImportError:
     pass

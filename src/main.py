@@ -885,7 +885,7 @@ def construct_initial_prompt(project, json_file):
             file_name = data['0']['file_name']
             patch_type = data['0']['patch_type']
             # prompt 开头 = 角色 + Few-Shot 示例
-            initial_prompt = INITIAL_APR_TOOL + INTIIAL_APR_EXAMPLE + get_example('Lang_example.txt')
+            initial_prompt = INITIAL_APR_TOOL + INTIIAL_APR_EXAMPLE + get_example('prompts/Lang_example.txt')
             single_line = False
 
             # ---- Replace 替换型 ----
@@ -966,7 +966,7 @@ def construct_single_function_initial_prompt(project, json_file):
         # 重置源文件修改（上次失败运行可能留下的脏代码），保留 Defects4J 元数据
         run_command(['git', 'checkout', '--', '.'], cwd=bug_dir)
     # 角色设定 + 单函数版 Few-Shot 示例
-    initial_prompt = INITIAL_APR_TOOL + INTIIAL_APR_EXAMPLE + get_example('Lang_single_function_example.txt')
+    initial_prompt = INITIAL_APR_TOOL + INTIIAL_APR_EXAMPLE + get_example('prompts/Lang_single_function_example.txt')
     next_line_no = data['0']['next_line_no']
     file_name = data['0']['file_name']
     source_file_path = os.path.join(BUGGY_PROJECT_FOLDER, project + no, file_name)
