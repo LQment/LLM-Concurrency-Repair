@@ -438,7 +438,9 @@ add_body_text(slide, "谢谢！", Inches(0), Inches(1.5), prs.slide_width, Inche
 add_body_text(slide, "请评委老师批评指正", Inches(0), Inches(3.6), prs.slide_width, Inches(0.8),
               size=Pt(24), color=RGBColor(0xBB, 0xCC, 0xDD))
 
-# 保存
-output_path = r"\\wsl$\Ubuntu\home\xx\an-implementation-of-chatrepair\中期检查_CHATREPAIR.pptx"
+# 保存到 docs/ 目录（脚本位于 scripts/ 下，上一层即项目根）
+import os as _os
+_project_root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+output_path = _os.path.join(_project_root, "docs", "中期检查_CHATREPAIR.pptx")
 prs.save(output_path)
 print(f"PPT saved to: {output_path}")
