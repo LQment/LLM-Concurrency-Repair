@@ -1,3 +1,8 @@
+import os
+
+# 项目根目录（constants.py 位于 src/ 下）
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 # ============================================================
 # 项目名称常量（Defects4J 中的 6 个 Java 项目）
 # ============================================================
@@ -20,15 +25,15 @@ PATCH_TYPE_DELETE = 'delete'    # 删除型补丁：删除整个函数后替换�
 LOG_FILE = "logs.txt"
 
 # ============================================================
-# 数据目录路径
+# 数据目录路径（相对于项目根目录 PROJECT_ROOT）
 # ============================================================
-PATCH_JSON_FOLDER = "patches"                      # 开发者补丁信息（JSON格式）
-CHATREPAIR_FOLDER = "chatrepair"                   # chatrepair 模式的运行结果（多轮对话+反馈）
-INITIALCHAT_FOLDER = "initialchat"                 # initial-chat 模式的运行结果（一次性对话）
-INITIAL_PROMPT_FOLDER = "initial"                  # 保存生成的初始 prompt
+PATCH_JSON_FOLDER = os.path.join(PROJECT_ROOT, "patches")
+CHATREPAIR_FOLDER = os.path.join(PROJECT_ROOT, "chatrepair")
+INITIALCHAT_FOLDER = os.path.join(PROJECT_ROOT, "initialchat")
+INITIAL_PROMPT_FOLDER = os.path.join(PROJECT_ROOT, "initial")
 
-BUGGY_PROJECT_FOLDER = "bugs"                      # 从 Defects4J checkout 出来的带 bug 的 Java 项目源码
-FAILING_TEST_FILE = "failing_tests"                # Defects4J 生成的失败测试信息文件名
+BUGGY_PROJECT_FOLDER = os.path.join(PROJECT_ROOT, "bugs")
+FAILING_TEST_FILE = "failing_tests"                # 文件名，在 BUGGY_PROJECT_FOLDER 下使用
 
 # 不同项目源码目录下测试文件的前缀路径（用于定位测试文件）
 TEST_FILEPATH_PREFIX = {"Closure": "test", "Mockito": "test", "Chart": "tests", "Lang": "src/test/java",
@@ -143,12 +148,10 @@ Max_Conv_len = 3      # 单轮对话的最大轮次（到达后重新开始一�
 #   export CHATREPAIR_MODEL="deepseek-v4-pro"
 #   export CHATREPAIR_BASE_URL="https://api.deepseek.com/v1"
 # ============================================================
-import os
-
 # 尝试从 .env 文件加载（如果安装了 python-dotenv）
 try:
     from dotenv import load_dotenv
-    _env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env')
+    _env_path = os.path.join(PROJECT_ROOT, '.env')
     load_dotenv(_env_path)
 except ImportError:
     pass
