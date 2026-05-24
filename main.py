@@ -558,7 +558,10 @@ def construct_feedback_after_validate(project, no, fb_list):
     # ======== Step 1: 编译 ========
     flag, stdout, stderr = run_command(DEFECTS4J_COMPILE.split(' '), 'utf-8', os.path.join(BUGGY_PROJECT_FOLDER, project + no), TEST_TIMEOUT_MAX_S)
     if not flag:
-        print(stderr)
+        try:
+            print(stderr)
+        except UnicodeEncodeError:
+            print("[compile stderr contains non-UTF-8 characters, omitted]")
     pattern = r"BUILD FAILED"
     result = re.search(pattern, stderr, re.DOTALL)
     feedback = ''
@@ -839,7 +842,7 @@ def open_file(path, pattern):
         os.makedirs(os.path.dirname(path), exist_ok=True)
     if pattern not in ['r', 'w', 'a']:
         return ''
-    file = open(path, pattern)
+    file = open(path, pattern, encoding='utf-8')
     return file
 
 
