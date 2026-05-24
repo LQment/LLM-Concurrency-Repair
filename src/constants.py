@@ -22,7 +22,7 @@ PATCH_TYPE_REPLACE = 'replace'  # 替换型补丁：修改某几行代码
 PATCH_TYPE_INSERT = 'insert'    # 插入型补丁：在某位置新增代码
 PATCH_TYPE_DELETE = 'delete'    # 删除型补丁：删除整个函数后替换为新函数
 
-LOG_FILE = "logs.txt"
+LOG_FILE = os.path.join(PROJECT_ROOT, "logs.txt")
 
 # ============================================================
 # 数据目录路径（相对于项目根目录 PROJECT_ROOT）
