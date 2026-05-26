@@ -142,6 +142,44 @@ Max_Tries = 24        # 每个 bug 的最大总尝试次数（包含 initial rep
 Max_Conv_len = 3      # 单轮对话的最大轮次（到达后重新开始一轮新的 dialogue）
 
 # ============================================================
+# Phase-1 改进：Multi-Candidate 多候选补丁生成
+# 每次迭代最多生成 NUM_CANDIDATES 个候选补丁，使用不同策略
+# ============================================================
+NUM_CANDIDATES = 3
+# 候选补丁生成的策略描述（追加到 prompt 末尾，引导 LLM 产生不同思路）
+CANDIDATE_STRATEGIES = [
+    "",  # 候选1：原始 prompt，不做修改
+    "\nThink step by step. First trace through the code with the failing test input, then identify the root cause.",
+    "\nConsider edge cases and null handling. What assumptions does the code make that might be wrong?",
+]
+
+# ============================================================
+# Phase-1 改进：Self-Debugging 自检提示词
+# 在验证补丁前，让 LLM 自己对生成的代码做一次审查
+# ============================================================
+SELF_DEBUG_PROMPT = """Review the following Java code for any issues that would cause compilation errors:
+- Syntax errors (missing semicolons, unmatched brackets, etc.)
+- Type mismatches (wrong argument types, incompatible return types)
+- Missing imports
+- References to undefined variables or methods
+
+If you find any issues, output the fully corrected code.
+If the code has no issues, output the original code as-is.
+
+Return ONLY the corrected (or original) Java code in a ```java code block. Do not include explanations.
+
+Code to review:
+```java
+{PATCH}
+```"""
+
+# ============================================================
+# Phase-1 改进：增强上下文 — 让 LLM 看到测试方法和类结构
+# ============================================================
+CLASS_CONTEXT_HEADER = "\nThe buggy function is in the following class context:\n"
+TEST_METHOD_HEADER = "\nHere is the complete failing test method for additional context:\n"
+
+# ============================================================
 # API 配置 — 从环境变量读取，避免密钥泄漏
 # 复制 .env.example 为 .env 并填入真实密钥，或直接设置环境变量：
 #   export CHATREPAIR_API_KEY="sk-xxx"

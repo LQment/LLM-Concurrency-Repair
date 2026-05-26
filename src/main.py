@@ -18,6 +18,10 @@ import re
 import difflib
 import sys
 import time
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # Windows 下不可用，并发写入保护降级
 
 import shutil
 from openai import OpenAI
@@ -225,6 +229,7 @@ def chat_repair(project, initial_prompt, json_file, all_single_function_flag):
     # ======== 阶段一：找到第一个 Plausible Patch ========
     # 外层 while：每轮是一次新的 dialogue（换一个 conversation 从头开始）
     # 内层 while：同一轮 dialogue 中的多轮对话（Max_Conv_len 次）
+    # Phase-1 改进：每次迭代生成多个候选补丁 + Self-Debug 自检
     while current_tries < Max_Tries and len(plausible_patches) == 0:
         context = []       # 当前 dialogue 的对话上下文
         current_length = 0 # 当前 dialogue 的对话轮数
@@ -232,38 +237,74 @@ def chat_repair(project, initial_prompt, json_file, all_single_function_flag):
         feedback_list = [] # 记录每次验证的反馈编码（用于统计）
 
         while current_length < Max_Conv_len:
-            print(f"  [Try {current_tries+1}/{Max_Tries}] Calling LLM...")
-            context.append({'role': 'user', 'content': prompt})
-            response = client.chat.completions.create(model=MODEL, messages=context)
-            # 暂停 1 秒防止请求频率过高
-            time.sleep(1)
-            response_text = response.choices[0].message.content
-            context.append({'role': 'assistant', 'content': response_text})
+            found_plausible = False
+            primary_feedback = None  # 本轮第一个产生有效反馈的候选（用于下一轮对话）
 
-            # 从回复中提取 Java 代码
-            patch = match_patch_code(response_text)
-            # 格式不符合预期 → 跳出当前 dialogue，开始新一轮
-            if patch == '':
-                print(f"  [Try {current_tries+1}/{Max_Tries}] No code extracted, retrying...")
+            for ci in range(NUM_CANDIDATES):
+                if current_tries >= Max_Tries:
+                    break
+
+                # 构造候选策略 prompt
+                candidate_prompt = prompt
+                strategy = CANDIDATE_STRATEGIES[ci]
+                if strategy:
+                    candidate_prompt = prompt.rstrip() + '\n' + strategy
+
+                print(f"  [Try {current_tries+1}/{Max_Tries}, C{ci+1}] Calling LLM...")
+
+                # 保存 context 位置以便回滚
+                saved_len = len(context)
+                context.append({'role': 'user', 'content': candidate_prompt})
+
+                response = client.chat.completions.create(model=MODEL, messages=context)
+                time.sleep(1)
+                response_text = response.choices[0].message.content
+                context.append({'role': 'assistant', 'content': response_text})
+
+                # 从回复中提取 Java 代码
+                patch = match_patch_code(response_text)
+                if patch == '':
+                    print(f"  [Try {current_tries+1}/{Max_Tries}, C{ci+1}] No code extracted")
+                    context = context[:saved_len]  # 回滚无效候选的上下文
+                    current_tries += 1
+                    continue
+
+                # Phase-1 改进：Self-Debug 自检循环
+                print(f"  [Try {current_tries+1}/{Max_Tries}, C{ci+1}] Self-debugging...")
+                patch = self_debug_patch(client, patch)
+
+                # 验证补丁
+                print(f"  [Try {current_tries+1}/{Max_Tries}, C{ci+1}] Validating patch...")
+                result = validate_patch(patch, project, json_file, all_single_function_flag, feedback_list)
                 current_tries += 1
+
+                if result == '':
+                    # 补丁通过所有测试！
+                    plausible_patches.append(patch)
+                    found_plausible = True
+                    break
+                if result == 'Exception':
+                    context = context[:saved_len]  # 回滚异常候选
+                    continue
+
+                # 保留第一个有效候选的反馈和上下文（用于下一轮对话）
+                if primary_feedback is None:
+                    primary_feedback = result
+                    # 保留此候选的上下文（不回滚），让对话可以延续
+                else:
+                    context = context[:saved_len]  # 回滚非第一个候选的上下文
+
+            if found_plausible:
                 break
 
-            print(f"  [Try {current_tries+1}/{Max_Tries}] Validating patch...")
-            # 验证补丁：写入 Java 文件 → 编译 → 跑测试 → 返回反馈
-            feedback = validate_patch(patch, project, json_file, all_single_function_flag, feedback_list)
-            if feedback == '':
-                # 空字符串 = 补丁通过所有测试！加入 plausible 列表
-                plausible_patches.append(patch)
-                current_length += 1
-                current_tries += 1
+            # 没有候选产生有效反馈 → 结束当前 dialogue，重新开始
+            if primary_feedback is None:
+                print(f"  [Try {current_tries}/{Max_Tries}] No valid feedback from any candidate, restarting dialogue...")
                 break
-            if feedback == 'Exception':
-                return 'Exception'  # 异常情况，向上抛出
-            else:
-                # 用反馈信息替换 prompt，让 LLM 根据错误修正代码
-                prompt = feedback
+
+            # 用第一个有效候选的反馈作为下一轮 prompt
+            prompt = primary_feedback
             current_length += 1
-            current_tries += 1
 
         # 记录本轮 dialogue 的反馈统计
         if feedback_list:
@@ -318,6 +359,8 @@ def chat_repair(project, initial_prompt, json_file, all_single_function_flag):
             patch = match_patch_code(response_text)
             if patch == '':
                 continue
+            # Self-Debug: 让 LLM 自查补丁代码
+            patch = self_debug_patch(client, patch)
             feedback = validate_patch(patch, project, json_file, all_single_function_flag, alternatives_list)
             if feedback == 'Exception':
                 return 'Exception'
@@ -826,6 +869,7 @@ def run_command(cmd, encoding='utf-8', cwd=None, timeout=None):
 
 # ============================================================
 # 文件操作工具：打开文件，路径不存在时自动创建父目录
+# 'a' 模式自动加文件锁，支持多进程并发写入
 # ============================================================
 def open_file(path, pattern):
     """
@@ -837,12 +881,15 @@ def open_file(path, pattern):
 
     返回:
         file object，如果路径的父目录不存在会自动创建
+        注意：调用者需要在写入完成后手动 f.close() 以释放锁
     """
     if not os.path.exists(path):
         os.makedirs(os.path.dirname(path), exist_ok=True)
     if pattern not in ['r', 'w', 'a']:
         return ''
     file = open(path, pattern, encoding='utf-8')
+    if pattern == 'a' and fcntl:
+        fcntl.flock(file.fileno(), fcntl.LOCK_EX)
     return file
 
 
@@ -883,6 +930,7 @@ def construct_initial_prompt(project, json_file):
             else:
                 run_command(['git', 'checkout', '--', '.'], cwd=bug_dir)
             file_name = data['0']['file_name']
+            source_file_path = os.path.join(BUGGY_PROJECT_FOLDER, project + no, file_name)
             patch_type = data['0']['patch_type']
             # prompt 开头 = 角色 + Few-Shot 示例
             initial_prompt = INITIAL_APR_TOOL + INTIIAL_APR_EXAMPLE + get_example(os.path.join(PROJECT_ROOT, 'prompts', 'Lang_example.txt'))
@@ -920,10 +968,11 @@ def construct_initial_prompt(project, json_file):
                 buggy_function = get_buggy_function(source_file_path, next_line_no, next_line_no, PATCH_TYPE_INSERT)
                 initial_prompt += INITIAL_Single_function + buggy_function
 
-            # 追加测试失败信息
-            failure_info = prompt_add_failure_test_info(project, json_file)
+            # 追加测试失败信息（含增强上下文）
+            failure_info, test_file_path, test_method_name = prompt_add_failure_test_info(project, json_file)
             if failure_info != '':
-                initial_prompt += failure_info
+                enhanced_context = get_enhanced_context(project, no, source_file_path, test_file_path, test_method_name)
+                initial_prompt += enhanced_context + failure_info
             else:
                 return ''
 
@@ -975,9 +1024,10 @@ def construct_single_function_initial_prompt(project, json_file):
         return ''
     # 提取完整 buggy 函数
     buggy_function = get_buggy_function(source_file_path, next_line_no, next_line_no, PATCH_TYPE_DELETE)
-    failure_info = prompt_add_failure_test_info(project, json_file)
+    failure_info, test_file_path, test_method_name = prompt_add_failure_test_info(project, json_file)
     if failure_info != '':
-        initial_prompt += INITIAL_Single_function + buggy_function + failure_info + INITIAL_Single_function_final
+        enhanced_context = get_enhanced_context(project, no, source_file_path, test_file_path, test_method_name)
+        initial_prompt += INITIAL_Single_function + buggy_function + enhanced_context + failure_info + INITIAL_Single_function_final
     else:
         initial_prompt = ''
     return initial_prompt
@@ -997,7 +1047,8 @@ def prompt_add_failure_test_info(project, json_file):
         with the following test error: <错误信息>
 
     返回:
-        格式化后的失败信息字符串，出错则返回 ''
+        (failure_info_string, test_file_full_path, test_method_name)
+        如果出错则返回 ('', '', '')
     """
     global previous_failure_test
     no = json_file.rstrip('.json')
@@ -1011,11 +1062,11 @@ def prompt_add_failure_test_info(project, json_file):
     # 解析 failing_tests 文件
     if is_file_empty_or_not_exists(failure_test_path):
         print("Warning: failing_tests not generated for " + project + no + ", skipping failure info in prompt.")
-        return ''
+        return '', '', ''
     failure_test, test_error, test_file, test_line_no = get_failure_test_info(failure_test_path)
     if test_file == '' or test_line_no == '':
         print("Warning: Unable to parse failing_tests for " + project + no)
-        return ''
+        return '', '', ''
 
     # 更新全局变量：记录当前失败测试（用于后续判断是否新失败）
     previous_failure_test = failure_test
@@ -1033,7 +1084,9 @@ def prompt_add_failure_test_info(project, json_file):
             if re.sub(r'\".*?\"', '', line).count(';') == 1:
                 break
 
-    return Failure_Test + failure_test + Failure_Test_line + ''.join(test_lines) + Failure_Test_error + test_error
+    failure_string = Failure_Test + failure_test + Failure_Test_line + ''.join(test_lines) + Failure_Test_error + test_error
+    test_method_name = failure_test.split("::")[1] if "::" in failure_test else ''
+    return failure_string, file, test_method_name
 
 
 # ============================================================
@@ -1175,6 +1228,149 @@ def get_example(example_file):
         example = f.read()
         f.close()
         return example
+
+
+# ============================================================
+# Phase-1 新功能 1: Self-Debugging 自检循环
+# LLM 生成 patch 后，让它自己 review 一遍，修正语法错误
+# ============================================================
+def self_debug_patch(client, patch):
+    """
+    让 LLM 自我审查生成的补丁代码，修正编译错误。
+
+    流程：把 patch 发给 LLM → LLM 检查语法/类型/导入等问题 → 返回修正后的代码
+
+    返回:
+        修正后的 patch 字符串；如果 self-debug 失败则返回原始 patch
+    """
+    prompt = SELF_DEBUG_PROMPT.replace('{PATCH}', patch)
+    try:
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[{'role': 'user', 'content': prompt}]
+        )
+        time.sleep(1)
+        response_text = response.choices[0].message.content
+        corrected = match_patch_code(response_text)
+        if corrected == '':
+            return patch  # 无法提取代码，退回原始 patch
+        return corrected
+    except Exception:
+        return patch  # API 调用失败，退回原始 patch
+
+
+# ============================================================
+# Phase-1 新功能 2: 增强上下文 — 提取完整测试方法源码
+# ============================================================
+def get_full_test_method(test_file_path, test_method_name):
+    """
+    从测试文件中提取失败测试方法的完整源码。
+
+    参数:
+        test_file_path: 测试 Java 文件路径
+        test_method_name: 测试方法名（如 'testIsSameLocalTime_Cal'）
+
+    返回:
+        完整测试方法源码字符串，找不到则返回 ''
+    """
+    if not os.path.exists(test_file_path):
+        return ''
+    with open(test_file_path, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+
+    # 查找方法声明行（匹配 @Test 注解或其下一行的方法签名）
+    start_line = None
+    for i, line in enumerate(lines):
+        if test_method_name in line and re.search(r'(public|private|protected)\s+\w+\s+' + test_method_name + r'\s*\(', line):
+            start_line = i
+            break
+    if start_line is None:
+        # 回退：只按方法名搜索
+        for i, line in enumerate(lines):
+            if test_method_name in line and '(' in line:
+                start_line = i
+                break
+    if start_line is None:
+        return ''
+
+    # 通过大括号匹配提取方法体
+    bracket_count = 0
+    method_lines = []
+    started = False
+    for line in lines[start_line:]:
+        method_lines.append(line)
+        bracket_count += line.count('{') - line.count('}')
+        if '{' in line:
+            started = True
+        if started and bracket_count <= 0:
+            break
+    return ''.join(method_lines)
+
+
+# ============================================================
+# Phase-1 新功能 2: 增强上下文 — 提取类骨架（字段+方法签名）
+# ============================================================
+def get_class_context(source_file_path):
+    """
+    提取 buggy 函数所在类的骨架信息，包含：
+        - 类声明
+        - 所有字段声明
+        - 所有方法签名（仅第一行，不含函数体）
+
+    这让 LLM 了解类的结构和可用字段/方法，从而写出兼容的代码。
+    """
+    if not os.path.exists(source_file_path):
+        return ''
+    with open(source_file_path, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+
+    context_parts = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith('//'):
+            continue
+
+        # 类/接口/枚举声明
+        if re.search(r'\b(class|interface|enum)\s+\w+', stripped):
+            if re.search(r'(public|private|protected)', stripped):
+                context_parts.append(line)
+            continue
+
+        # 字段声明（有类型、有变量名、无括号 = 不是方法）
+        if re.search(r'(private|protected|public)\s+\w+', stripped) and '(' not in stripped:
+            if ';' in stripped or '=' in stripped:
+                context_parts.append(line)
+            continue
+
+        # 方法签名（含括号和返回类型，只记录签名行）
+        if re.search(r'(public|private|protected)\s+.*\(.*\)', stripped):
+            context_parts.append(line)
+            continue
+
+    return ''.join(context_parts)
+
+
+# ============================================================
+# Phase-1 新功能 2: 增强上下文 — 组装上下文信息
+# ============================================================
+def get_enhanced_context(project, no, source_file_path, test_file_path, test_method_name):
+    """
+    收集增强上下文：类骨架 + 完整测试方法源码。
+
+    返回:
+        拼接好的上下文字符串，可直接追加到 prompt 中
+    """
+    context = ''
+    class_context = get_class_context(source_file_path)
+    if class_context:
+        context += CLASS_CONTEXT_HEADER + class_context + '\n'
+
+    if test_file_path and test_method_name:
+        test_method_source = get_full_test_method(test_file_path, test_method_name)
+        if test_method_source:
+            context += TEST_METHOD_HEADER + test_method_source + '\n'
+
+    return context
 
 
 # ============================================================

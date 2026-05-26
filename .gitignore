@@ -24,3 +24,11 @@ logs.txt
 
 # ===== Office 临时文件 =====
 ~$*
+
+# ===== Local tooling =====
+.claude/
+
+# ===== Generated outputs =====
+logs/
+docs/CHATREPAIR_V2_*.pptx
+docs/CHATREPAIR_V2_*V3*.md
