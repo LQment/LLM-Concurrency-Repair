@@ -49,6 +49,8 @@ DEFECTS4J_COMPILE = "defects4j compile"                       # 编译项目
 DEFECTS4J_TEST = "defects4j test"                             # 运行测试
 DEFECTS4J_COMPILE_TEST = "defects4j compile ; defects4j test"  # 编译并测试
 TEST_TIMEOUT_MAX_S = 60                                       # 测试超时时间（秒）
+TRIGGER_TEST_TIMEOUT_S = 20                                   # 仅跑原始失败测试的超时时间（秒）
+RELEVANT_TEST_TIMEOUT_S = 45                                  # 跑 relevant tests 的超时时间（秒）
 
 # ============================================================
 # Prompt 模板 — INFILL 标记
@@ -131,21 +133,22 @@ INITIALCHAT_STATISTIFCS_FILE = 'initialchat_statistics.csv'     # 初始对话�
 # ============================================================
 # initial-chat 模式配置
 # ============================================================
-NUMOFREPEAT_PER_BUG = 24  # 每个 bug 的最大重复尝试次数
+NUMOFREPEAT_PER_BUG = max(1, int(os.environ.get("CHATREPAIR_NUM_REPEAT", "24")))  # 每个 bug 的最大重复尝试次数
 # 补丁结果分类标签：FNT=新测试失败, FOT=旧测试仍失败, CE=编译错误, TOUT=超时, P=通过
 PATCH_FAILURE_CATEGORY = ['FNT','FOT','CE','CE','TOUT','P']
 
 # ============================================================
 # chatrepair 模式配置
 # ============================================================
-Max_Tries = 24        # 每个 bug 的最大总尝试次数（包含 initial repair + alternative 两个阶段）
-Max_Conv_len = 3      # 单轮对话的最大轮次（到达后重新开始一轮新的 dialogue）
+Max_Tries = max(1, int(os.environ.get("CHATREPAIR_MAX_TRIES", "24")))        # 每个 bug 的最大总尝试次数（包含 initial repair + alternative 两个阶段）
+Max_Conv_len = max(1, int(os.environ.get("CHATREPAIR_MAX_CONV_LEN", "3")))      # 单轮对话的最大轮次（到达后重新开始一轮新的 dialogue）
 
 # ============================================================
 # Phase-1 改进：Multi-Candidate 多候选补丁生成
 # 每次迭代最多生成 NUM_CANDIDATES 个候选补丁，使用不同策略
 # ============================================================
-NUM_CANDIDATES = 3
+NUM_CANDIDATES = max(1, int(os.environ.get("CHATREPAIR_NUM_CANDIDATES", "3")))
+SELF_DEBUG_ENABLED = os.environ.get("CHATREPAIR_SELF_DEBUG", "1").lower() not in {"0", "false", "no"}
 # 候选补丁生成的策略描述（追加到 prompt 末尾，引导 LLM 产生不同思路）
 CANDIDATE_STRATEGIES = [
     "",  # 候选1：原始 prompt，不做修改
@@ -197,3 +200,5 @@ except ImportError:
 MODEL = os.environ.get("CHATREPAIR_MODEL", "deepseek-v4-pro")
 API_KEY = os.environ.get("CHATREPAIR_API_KEY", "")
 BASE_URL = os.environ.get("CHATREPAIR_BASE_URL", "https://api.deepseek.com/v1")
+API_TIMEOUT_S = int(os.environ.get("CHATREPAIR_API_TIMEOUT_S", "180"))
+API_MAX_RETRIES = int(os.environ.get("CHATREPAIR_API_MAX_RETRIES", "3"))
