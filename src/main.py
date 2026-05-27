@@ -75,7 +75,12 @@ def chat_initial(project, all_single_function_flag, bug_no=None):
             if not initial_prompt == '':
                 # 构造对话上下文（只有 user ↔ assistant 两轮）
                 context = [{'role': 'user', 'content': initial_prompt}]
-                response = client.chat.completions.create(model=MODEL, messages=context)
+                try:
+                    response = request_chat_completion(client, context)
+                except Exception as exc:
+                    print(f"[{project}-{no}] LLM call failed: {exc.__class__.__name__}: {exc}")
+                    i += 1
+                    continue
                 # 暂停 1 秒防止请求频率过高
                 time.sleep(1)
                 response_text = response.choices[0].message.content
@@ -84,10 +89,12 @@ def chat_initial(project, all_single_function_flag, bug_no=None):
                 patch = match_patch_code(response_text)
                 # 没有提取到有效补丁 → 重新尝试
                 if patch == '':
+                    i += 1
                     continue
                 result = []
                 feedback = validate_patch(patch, project, json_file, all_single_function_flag, result)
                 if feedback == 'Exception':
+                    i += 1
                     continue
 
                 # 保存本轮对话记录到文件
@@ -120,10 +127,9 @@ def diff_buggy_and_new(project, json_file, new_function):
     with open(os.path.join(PATCH_JSON_FOLDER, project, json_file), 'r', encoding="utf-8") as f:
         data = json.load(f)
         f.close()
-    if not os.path.exists(os.path.join(BUGGY_PROJECT_FOLDER, project + no)):
-        os.system(DEFECTS4J_CHECKOUT % (project, no + 'b', os.path.join(BUGGY_PROJECT_FOLDER, project + no)))
     next_line_no = data['0']['next_line_no']
     file_name = data['0']['file_name']
+    prepare_bug_workspace(project, no, file_name)
     source_file_path = os.path.join(BUGGY_PROJECT_FOLDER, project + no, file_name)
     buggy_function = get_buggy_function(source_file_path, next_line_no, next_line_no, PATCH_TYPE_DELETE)
     diff = difflib.Differ()
@@ -142,10 +148,9 @@ def diff_buggy_and_newlist(project, json_file, new_function_list):
     with open(os.path.join(PATCH_JSON_FOLDER, project, json_file), 'r', encoding="utf-8") as f:
         data = json.load(f)
         f.close()
-    if not os.path.exists(os.path.join(BUGGY_PROJECT_FOLDER, project + no)):
-        os.system(DEFECTS4J_CHECKOUT % (project, no + 'b', os.path.join(BUGGY_PROJECT_FOLDER, project + no)))
     next_line_no = data['0']['next_line_no']
     file_name = data['0']['file_name']
+    prepare_bug_workspace(project, no, file_name)
     source_file_path = os.path.join(BUGGY_PROJECT_FOLDER, project + no, file_name)
     buggy_function = get_buggy_function(source_file_path, next_line_no, next_line_no, PATCH_TYPE_DELETE)
     diff = difflib.Differ()
@@ -231,10 +236,15 @@ def chat_repair(project, initial_prompt, json_file, all_single_function_flag):
         prompt = initial_prompt
         feedback_list = [] # 记录每次验证的反馈编码（用于统计）
 
-        while current_length < Max_Conv_len:
+        while current_length < Max_Conv_len and current_tries < Max_Tries:
             print(f"  [Try {current_tries+1}/{Max_Tries}] Calling LLM...")
             context.append({'role': 'user', 'content': prompt})
-            response = client.chat.completions.create(model=MODEL, messages=context)
+            try:
+                response = request_chat_completion(client, context)
+            except Exception as exc:
+                print(f"  [Try {current_tries+1}/{Max_Tries}] LLM call failed: {exc.__class__.__name__}: {exc}")
+                current_tries += 1
+                break
             # 暂停 1 秒防止请求频率过高
             time.sleep(1)
             response_text = response.choices[0].message.content
@@ -311,12 +321,18 @@ def chat_repair(project, initial_prompt, json_file, all_single_function_flag):
             else:
                 prompt = delete_substring_to_end(initial_prompt.split('<Example end>')[1].strip(), "Please provide") + Alt_Instruct_1 + patches_prompt + Alt_Instruct_2
             context.append({'role': 'user', 'content': prompt})
-            response = client.chat.completions.create(model=MODEL, messages=context)
+            try:
+                response = request_chat_completion(client, context)
+            except Exception as exc:
+                print(f"[{project}-{json_file.rstrip('.json')}] Alternative generation failed: {exc.__class__.__name__}: {exc}")
+                current_tries += 1
+                continue
             time.sleep(1)
             response_text = response.choices[0].message.content
             context.append({'role': 'assistant', 'content': response_text})
             patch = match_patch_code(response_text)
             if patch == '':
+                current_tries += 1
                 continue
             feedback = validate_patch(patch, project, json_file, all_single_function_flag, alternatives_list)
             if feedback == 'Exception':
@@ -401,11 +417,6 @@ def validate_patch(patch, project, json_file, all_single_function_flag, fb_list)
     javafile_path = ''
     no = json_file.rstrip('.json')
 
-    # 如果本地还没有该 bug 的源码，先 checkout
-    if not os.path.exists(os.path.join(BUGGY_PROJECT_FOLDER, project + no)):
-        os.system(DEFECTS4J_CHECKOUT % (
-            project, no + 'b', os.path.join(BUGGY_PROJECT_FOLDER, project + no)))
-
     # 读取补丁元数据（文件名、行号、补丁类型）
     with open(os.path.join(PATCH_JSON_FOLDER, project, json_file), 'r', encoding="utf-8") as f:
         data = json.load(f)
@@ -415,6 +426,7 @@ def validate_patch(patch, project, json_file, all_single_function_flag, fb_list)
     single_function = False
     file_name = data['0']['file_name']
     patch_type = data['0']['patch_type']
+    prepare_bug_workspace(project, no, file_name)
     javafile_path = os.path.join(BUGGY_PROJECT_FOLDER, project + no, file_name)
 
     # ======== 备份原始 Java 文件（验证完后必须恢复） ========
@@ -824,6 +836,99 @@ def run_command(cmd, encoding='utf-8', cwd=None, timeout=None):
             return False, '[ERROR]:{} time out after {} seconds'.format(cmd, timeout), '[ERROR]:{} time out after {} seconds'.format(cmd, timeout)
 
 
+def summarize_command_output(stdout, stderr, max_lines=20):
+    text = stderr.strip() or stdout.strip()
+    if text == '':
+        return 'no command output captured'
+    lines = text.splitlines()
+    if len(lines) > max_lines:
+        lines = lines[-max_lines:]
+    return '\n'.join(lines)
+
+
+def request_chat_completion(client, messages, model=MODEL, timeout=API_TIMEOUT_S, max_retries=API_MAX_RETRIES):
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            return client.chat.completions.create(model=model, messages=messages, timeout=timeout)
+        except Exception as exc:
+            last_error = exc
+            message = str(exc).lower()
+            retryable = (
+                'timeout' in message
+                or 'timed out' in message
+                or 'connection' in message
+                or 'rate limit' in message
+                or exc.__class__.__name__ in {'APITimeoutError', 'APIConnectionError', 'RateLimitError', 'InternalServerError'}
+            )
+            if (not retryable) or attempt + 1 >= max_retries:
+                raise
+            wait_seconds = min(8, 2 * (attempt + 1))
+            print(f"OpenAI request failed ({exc.__class__.__name__}), retrying in {wait_seconds}s...")
+            time.sleep(wait_seconds)
+    raise last_error
+
+
+def is_defects4j_workspace(bug_dir):
+    return os.path.exists(os.path.join(bug_dir, '.defects4j.config'))
+
+
+def checkout_bug_workspace(project, no, bug_dir):
+    if os.path.exists(bug_dir):
+        shutil.rmtree(bug_dir)
+    cmd = ['defects4j', 'checkout', '-p', project, '-v', no + 'b', '-w', bug_dir]
+    success, stdout, stderr = run_command(cmd, 'utf-8', PROJECT_ROOT, TEST_TIMEOUT_MAX_S * 4)
+    if not success or not is_defects4j_workspace(bug_dir):
+        detail = summarize_command_output(stdout, stderr)
+        raise RuntimeError(f'Failed to checkout {project}-{no}.\n{detail}')
+    return bug_dir
+
+
+def prepare_bug_workspace(project, no, required_relpath=None, force_recheckout=False):
+    bug_dir = os.path.join(BUGGY_PROJECT_FOLDER, project + no)
+    required_path = os.path.join(bug_dir, required_relpath) if required_relpath else None
+    needs_recheckout = force_recheckout or not os.path.isdir(bug_dir) or not is_defects4j_workspace(bug_dir)
+    if not needs_recheckout and required_path is not None and not os.path.exists(required_path):
+        needs_recheckout = True
+    if needs_recheckout:
+        return checkout_bug_workspace(project, no, bug_dir)
+    success, stdout, stderr = run_command(['git', 'checkout', '--', '.'], cwd=bug_dir)
+    if not success:
+        detail = summarize_command_output(stdout, stderr)
+        print(f'[{project}-{no}] git checkout failed, recreating workspace...\n{detail}')
+        return checkout_bug_workspace(project, no, bug_dir)
+    return bug_dir
+
+
+def ensure_failing_tests_file(project, no):
+    bug_dir = prepare_bug_workspace(project, no)
+    failure_test_path = os.path.join(bug_dir, FAILING_TEST_FILE)
+    if not is_file_empty_or_not_exists(failure_test_path):
+        return failure_test_path
+
+    last_detail = ''
+    for attempt in range(2):
+        compile_ok, compile_stdout, compile_stderr = run_command(
+            DEFECTS4J_COMPILE.split(' '), 'utf-8', bug_dir, TEST_TIMEOUT_MAX_S
+        )
+        test_ok, test_stdout, test_stderr = run_command(
+            DEFECTS4J_TEST.split(' '), 'utf-8', bug_dir, TEST_TIMEOUT_MAX_S
+        )
+        if not is_file_empty_or_not_exists(failure_test_path):
+            return failure_test_path
+        compile_detail = summarize_command_output(compile_stdout, compile_stderr)
+        test_detail = summarize_command_output(test_stdout, test_stderr)
+        last_detail = f'compile_ok={compile_ok}\n{compile_detail}\n\ntest_ok={test_ok}\n{test_detail}'
+        if attempt == 0:
+            print(f'[{project}-{no}] failing_tests missing after compile/test, retrying with a fresh checkout...')
+            bug_dir = prepare_bug_workspace(project, no, force_recheckout=True)
+            failure_test_path = os.path.join(bug_dir, FAILING_TEST_FILE)
+
+    raise RuntimeError(
+        f'Unable to generate failing_tests for {project}-{no} after rebuilding the workspace.\n{last_detail}'
+    )
+
+
 # ============================================================
 # 文件操作工具：打开文件，路径不存在时自动创建父目录
 # ============================================================
@@ -877,12 +982,8 @@ def construct_initial_prompt(project, json_file):
         # 只处理单块补丁，multi-hunk 暂不支持
         if num_of_hunks == 1:
             # 如果本地还没有该 bug 的源码，先 checkout
-            bug_dir = os.path.join(BUGGY_PROJECT_FOLDER, project + no)
-            if not os.path.exists(bug_dir):
-                os.system(DEFECTS4J_CHECKOUT % (project, no + 'b', bug_dir))
-            else:
-                run_command(['git', 'checkout', '--', '.'], cwd=bug_dir)
             file_name = data['0']['file_name']
+            prepare_bug_workspace(project, no, file_name)
             patch_type = data['0']['patch_type']
             # prompt 开头 = 角色 + Few-Shot 示例
             initial_prompt = INITIAL_APR_TOOL + INTIIAL_APR_EXAMPLE + get_example(os.path.join(PROJECT_ROOT, 'prompts', 'Lang_example.txt'))
@@ -958,17 +1059,11 @@ def construct_single_function_initial_prompt(project, json_file):
     with open(os.path.join(PATCH_JSON_FOLDER, project, json_file), 'r', encoding="utf-8") as f:
         data = json.load(f)
         f.close()
-    # 如果本地还没有该 bug 的源码，先 checkout
-    bug_dir = os.path.join(BUGGY_PROJECT_FOLDER, project + no)
-    if not os.path.exists(bug_dir):
-        os.system(DEFECTS4J_CHECKOUT % (project, no + 'b', bug_dir))
-    else:
-        # 重置源文件修改（上次失败运行可能留下的脏代码），保留 Defects4J 元数据
-        run_command(['git', 'checkout', '--', '.'], cwd=bug_dir)
+    file_name = data['0']['file_name']
+    prepare_bug_workspace(project, no, file_name)
     # 角色设定 + 单函数版 Few-Shot 示例
     initial_prompt = INITIAL_APR_TOOL + INTIIAL_APR_EXAMPLE + get_example(os.path.join(PROJECT_ROOT, 'prompts', 'Lang_single_function_example.txt'))
     next_line_no = data['0']['next_line_no']
-    file_name = data['0']['file_name']
     source_file_path = os.path.join(BUGGY_PROJECT_FOLDER, project + no, file_name)
     if not os.path.exists(source_file_path):
         print("ERROR: Source file not found: " + source_file_path)
@@ -1001,16 +1096,10 @@ def prompt_add_failure_test_info(project, json_file):
     """
     global previous_failure_test
     no = json_file.rstrip('.json')
-    failure_test_path = os.path.join(BUGGY_PROJECT_FOLDER, project + no, FAILING_TEST_FILE)
-    # 如果失败测试文件不存在或为空，先编译测试一次生成它
-    if is_file_empty_or_not_exists(failure_test_path):
-        bug_dir = os.path.join(BUGGY_PROJECT_FOLDER, project + no)
-        run_command(DEFECTS4J_COMPILE.split(' '), 'utf-8', bug_dir, TEST_TIMEOUT_MAX_S)
-        run_command(DEFECTS4J_TEST.split(' '), 'utf-8', bug_dir, TEST_TIMEOUT_MAX_S)
-
-    # 解析 failing_tests 文件
-    if is_file_empty_or_not_exists(failure_test_path):
-        print("Warning: failing_tests not generated for " + project + no + ", skipping failure info in prompt.")
+    try:
+        failure_test_path = ensure_failing_tests_file(project, no)
+    except Exception as exc:
+        print("Warning: failing_tests not generated for " + project + no + ": " + str(exc))
         return ''
     failure_test, test_error, test_file, test_line_no = get_failure_test_info(failure_test_path)
     if test_file == '' or test_line_no == '':

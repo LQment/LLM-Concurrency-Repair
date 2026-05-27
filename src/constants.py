@@ -49,6 +49,8 @@ DEFECTS4J_COMPILE = "defects4j compile"                       # 编译项目
 DEFECTS4J_TEST = "defects4j test"                             # 运行测试
 DEFECTS4J_COMPILE_TEST = "defects4j compile ; defects4j test"  # 编译并测试
 TEST_TIMEOUT_MAX_S = 60                                       # 测试超时时间（秒）
+API_TIMEOUT_S = int(os.environ.get("CHATREPAIR_API_TIMEOUT_S", "180"))
+API_MAX_RETRIES = int(os.environ.get("CHATREPAIR_API_MAX_RETRIES", "3"))
 
 # ============================================================
 # Prompt 模板 — INFILL 标记
