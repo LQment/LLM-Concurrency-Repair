@@ -29,6 +29,7 @@ LOG_FILE = os.path.join(PROJECT_ROOT, "logs.txt")
 # ============================================================
 PATCH_JSON_FOLDER = os.path.join(PROJECT_ROOT, "patches")
 CHATREPAIR_FOLDER = os.path.join(PROJECT_ROOT, "chatrepair")
+AGENTREPAIR_FOLDER = os.path.join(PROJECT_ROOT, "agentrepair")
 INITIALCHAT_FOLDER = os.path.join(PROJECT_ROOT, "initialchat")
 INITIAL_PROMPT_FOLDER = os.path.join(PROJECT_ROOT, "initial")
 
@@ -202,3 +203,13 @@ API_KEY = os.environ.get("CHATREPAIR_API_KEY", "")
 BASE_URL = os.environ.get("CHATREPAIR_BASE_URL", "https://api.deepseek.com/v1")
 API_TIMEOUT_S = int(os.environ.get("CHATREPAIR_API_TIMEOUT_S", "180"))
 API_MAX_RETRIES = int(os.environ.get("CHATREPAIR_API_MAX_RETRIES", "3"))
+
+# ============================================================
+# V3 AgentRepair 配置
+# ============================================================
+AGENT_MAX_STEPS = max(1, int(os.environ.get("CHATREPAIR_AGENT_MAX_STEPS", "12")))
+AGENT_MAX_TOOL_CALLS = max(1, int(os.environ.get("CHATREPAIR_AGENT_MAX_TOOL_CALLS", "20")))
+AGENT_OBSERVATION_MAX_CHARS = max(500, int(os.environ.get("CHATREPAIR_AGENT_OBS_MAX_CHARS", "5000")))
+AGENT_TRACE_MAX_CHARS = max(1000, int(os.environ.get("CHATREPAIR_AGENT_TRACE_MAX_CHARS", "12000")))
+AGENT_TOP_PATCHES = max(1, int(os.environ.get("CHATREPAIR_AGENT_TOP_PATCHES", "3")))
+AGENT_DEFAULT_MODE = os.environ.get("CHATREPAIR_AGENT_DEFAULT_MODE", "single-function")

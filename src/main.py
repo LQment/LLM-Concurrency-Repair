@@ -199,6 +199,52 @@ def go_chat_repair(project, all_single_function_flag, bug_no=None):
                 i += 1
 
 
+def go_agent_repair(project, all_single_function_flag, bug_no=None):
+    """Run the V3 tool-use agent while reusing V2 prompt and validation logic."""
+    from agent.loop import AgentServices, run_agent_repair
+
+    files = os.listdir(os.path.join(PATCH_JSON_FOLDER, project))
+    if bug_no is not None:
+        files = [f for f in files if f.rstrip('.json') == bug_no]
+    if len(files) == 0:
+        print("No bugs to process. Available bugs in patches/" + project + "/: " + ", ".join(sorted([f.rstrip('.json') for f in os.listdir(os.path.join(PATCH_JSON_FOLDER, project))])))
+        return
+
+    services = AgentServices(
+        prepare_bug_workspace=prepare_bug_workspace,
+        ensure_failing_tests_file=ensure_failing_tests_file,
+        get_failure_test_info=get_failure_test_info,
+        validate_patch=validate_patch,
+        diff_buggy_and_newlist=diff_buggy_and_newlist,
+        get_buggy_function=get_buggy_function,
+        run_command=run_command,
+        summarize_command_output=summarize_command_output,
+        request_chat_completion=request_chat_completion,
+    )
+
+    for json_file in files:
+        bug_name = json_file.rstrip('.json')
+        print(f"[{project}-{bug_name}] Constructing V3 agent prompt...")
+        if all_single_function_flag:
+            initial_prompt = construct_single_function_initial_prompt(project, json_file)
+        else:
+            initial_prompt = construct_initial_prompt(project, json_file)
+        if initial_prompt == '':
+            print(f"[{project}-{bug_name}] Skipped (empty prompt)")
+            continue
+
+        print(f"[{project}-{bug_name}] Starting agentrepair...")
+        try:
+            result = run_agent_repair(project, json_file, all_single_function_flag, initial_prompt, services)
+            status = "PASS" if result.plausible else "FAIL"
+            print(
+                f"[{project}-{bug_name}] AgentRepair {status}: tries={result.tries}, "
+                f"steps={result.steps}, tool_calls={result.tool_calls}, reason={result.reason}"
+            )
+        except Exception as exc:
+            print(f"[{project}-{bug_name}] AgentRepair failed: {exc.__class__.__name__}: {exc}")
+
+
 # ============================================================
 # CHATREPAIR 核心流程（单个 bug 的完整修复流程）
 #
@@ -1521,27 +1567,28 @@ def get_enhanced_context(project, no, source_file_path, test_file_path, test_met
 # 用法：python main.py <instruction> <project> <single_function_flag>
 #
 # 参数说明：
-#   instruction      : initial-save / initial-chat / chatrepair
+#   instruction      : initial-save / initial-chat / chatrepair / agentrepair
 #   project          : Lang / Chart / Closure / Math / Mockito / Time
 #   single_func_flag : y（single-function 模式）/ n（single-line/hunk 模式）
 #
 # 示例：
 #   python main.py chatrepair Lang y    →  对 Lang 项目以 single-function 模式执行 chatrepair
+#   python main.py agentrepair Lang y 14 →  对 Lang-14 执行 V3 AgentRepair
 #   python main.py initial-save Chart n →  对 Chart 项目以 single-line/hunk 模式生成初始 prompt
 # ============================================================
 if __name__ == '__main__':
     args = sys.argv[1:]
     if len(args) < 3:
         print("Usage: python main.py <mode> <project> <y/n> [bug_no]")
-        print("  mode: initial-save | initial-chat | chatrepair")
+        print("  mode: initial-save | initial-chat | chatrepair | agentrepair")
         print("  project: " + " | ".join(PROJECTS))
         print("  y/n: y=single-function, n=single-line/hunk")
         print("  bug_no: (optional) specific bug number, e.g. 1 or 10. Omit to run all.")
         sys.exit(0)
     ins, p, all = args[0:3]
     bug_no = args[3] if len(args) > 3 else None
-    if ins not in ["chatrepair", "initial-save", "initial-chat"]:
-        print("Instruction only support \"chatrepair\"and\"initial-save\" and \"initial-chat\"")
+    if ins not in ["chatrepair", "initial-save", "initial-chat", "agentrepair"]:
+        print("Instruction only support \"chatrepair\", \"agentrepair\", \"initial-save\" and \"initial-chat\"")
     else:
         if p not in PROJECTS:
             print("Project only support these:\n")
@@ -1559,3 +1606,7 @@ if __name__ == '__main__':
                 go_chat_repair(p, True, bug_no)
             elif ins == "chatrepair" and all == 'n':
                 go_chat_repair(p, False, bug_no)
+            elif ins == "agentrepair" and all == 'y':
+                go_agent_repair(p, True, bug_no)
+            elif ins == "agentrepair" and all == 'n':
+                go_agent_repair(p, False, bug_no)

@@ -6,7 +6,7 @@
 #   bash scripts/parallel_run.sh <mode> <project> <y/n> [bug_numbers] [parallel_limit]
 #
 # 参数:
-#   mode           : chatrepair | initial-chat | initial-save
+#   mode           : chatrepair | agentrepair | initial-chat | initial-save
 #   project        : Lang | Chart | Closure | Math | Mockito | Time
 #   y/n            : y=single-function, n=single-line/hunk
 #   bug_numbers    : 空格分隔的 bug 编号，如 "1 10 12 14"（默认自动从 patches/ 目录读取）
@@ -14,6 +14,7 @@
 #
 # 示例:
 #   bash scripts/parallel_run.sh chatrepair Lang y "10 12 14" 2
+#   bash scripts/parallel_run.sh agentrepair Lang y "14 51" 2
 #   bash scripts/parallel_run.sh chatrepair Lang y                 # 自动运行所有 Lang bug
 #   bash scripts/parallel_run.sh chatrepair Chart y "1 2 3" 3
 # ============================================================
@@ -124,6 +125,10 @@ for BUG in $BUG_NUMBERS; do
             STATUS_LINE="[$(date '+%H:%M:%S')] $PROJECT-$BUG: TIMEOUT (exit=$EXIT_CODE)"
         elif [ $EXIT_CODE -ne 0 ]; then
             STATUS_LINE="[$(date '+%H:%M:%S')] $PROJECT-$BUG: FAILED (exit=$EXIT_CODE)"
+        elif grep -q "AgentRepair PASS" "$LOG_FILE"; then
+            STATUS_LINE="[$(date '+%H:%M:%S')] $PROJECT-$BUG: PASS"
+        elif grep -q "AgentRepair FAIL" "$LOG_FILE"; then
+            STATUS_LINE="[$(date '+%H:%M:%S')] $PROJECT-$BUG: FAIL"
         elif grep -q "Skipped (empty prompt)" "$LOG_FILE"; then
             STATUS_LINE="[$(date '+%H:%M:%S')] $PROJECT-$BUG: SKIPPED"
         else
