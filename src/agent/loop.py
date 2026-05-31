@@ -1,12 +1,14 @@
 import csv
 import json
 import os
+import re
 import time
 from typing import Any, Callable, Dict, List, Optional
 
 from openai import OpenAI
 
 from constants import (
+    AGENT_FORCE_PATCH_AFTER,
     AGENT_MAX_STEPS,
     AGENT_MAX_TOOL_CALLS,
     AGENT_OBSERVATION_MAX_CHARS,
@@ -18,10 +20,11 @@ from constants import (
     API_KEY,
 )
 
-from .patch_manager import PatchManager, parse_agent_action
+from .patch_manager import PatchManager, count_method_params, extract_method_name, extract_method_signature, parse_agent_action
 from .prompts import (
     SYSTEM_PROMPT,
     build_candidate_summary,
+    build_force_patch_prompt,
     build_initial_prompt,
     build_patch_feedback,
     format_tool_result,
@@ -39,6 +42,7 @@ class AgentServices:
         ensure_failing_tests_file: Callable[..., str],
         get_failure_test_info: Callable[..., tuple],
         validate_patch: Callable[..., str],
+        construct_feedback_after_validate: Callable[..., str],
         diff_buggy_and_newlist: Callable[..., List[str]],
         get_buggy_function: Callable[..., str],
         run_command: Callable[..., tuple],
@@ -49,6 +53,7 @@ class AgentServices:
         self.ensure_failing_tests_file = ensure_failing_tests_file
         self.get_failure_test_info = get_failure_test_info
         self.validate_patch = validate_patch
+        self.construct_feedback_after_validate = construct_feedback_after_validate
         self.diff_buggy_and_newlist = diff_buggy_and_newlist
         self.get_buggy_function = get_buggy_function
         self.run_command = run_command
@@ -69,6 +74,7 @@ def run_agent_repair(
         observation_max_chars=AGENT_OBSERVATION_MAX_CHARS,
         trace_max_chars=AGENT_TRACE_MAX_CHARS,
         top_patches=AGENT_TOP_PATCHES,
+        force_patch_after=AGENT_FORCE_PATCH_AFTER,
     )
     context = build_bug_context(project, json_file, all_single_function_flag, services)
     output_dir = os.path.join(AGENTREPAIR_FOLDER, project, "bug" + context.bug_no)
@@ -100,6 +106,15 @@ def run_agent_repair(
     steps_executed = 0
     for step in range(1, config.max_steps + 1):
         steps_executed = step
+        if len(candidates) >= config.top_patches and not plausible_patches:
+            reason = "candidate limit reached"
+            break
+
+        force_patch_now = step >= config.force_patch_after and not plausible_patches
+        if force_patch_now:
+            messages.append({"role": "user", "content": build_force_patch_prompt(context, original_function, len(candidates))})
+            trim_messages(messages, config.trace_max_chars)
+
         response_text = call_agent_model(client, messages, services)
         write_jsonl(trace_path, {"step": step, "type": "model", "content": response_text})
         action = parse_agent_action(response_text)
@@ -107,29 +122,41 @@ def run_agent_repair(
 
         if action.action == "invalid_response":
             messages.append({"role": "assistant", "content": response_text})
-            messages.append({"role": "user", "content": "Your previous response was not valid JSON. Return exactly one JSON action using the allowed schema."})
+            if force_patch_now:
+                messages.append({"role": "user", "content": build_force_patch_prompt(context, original_function, len(candidates))})
+            else:
+                messages.append({"role": "user", "content": "Your previous response was not valid JSON. Return exactly one JSON action using the allowed schema."})
             continue
 
         if action.action in {"propose_patch", "validate_patch"}:
             patch = str(action.args.get("patch", "")).strip()
             if not patch:
                 messages.append({"role": "assistant", "content": response_text})
-                messages.append({"role": "user", "content": "Patch was empty. Continue investigating or propose a concrete Java patch."})
+                messages.append({"role": "user", "content": build_force_patch_prompt(context, original_function, len(candidates))})
                 continue
 
-            candidate = patch_manager.build_candidate(patch, action.action, step)
+            candidate_args = dict(action.args)
+            active_original, candidate_args = resolve_candidate_location(context, candidate_args, patch, original_function)
+            active_manager = PatchManager(active_original)
+            candidate = active_manager.build_candidate(patch, action.action, step)
             candidates.append(candidate)
             if candidate.duplicate or candidate.risk_score > 0:
-                candidate.validation_feedback = "Rejected before validation by reviewer/reranker."
+                signature_hint = ""
+                if active_manager.target_signature:
+                    signature_hint = f" Required target signature: {active_manager.target_signature}."
+                candidate.validation_feedback = "Rejected before validation by reviewer/reranker." + signature_hint
                 write_jsonl(candidates_path, candidate.to_dict())
                 feedback = build_patch_feedback(candidate, config.observation_max_chars)
+                if len(candidates) >= config.top_patches:
+                    reason = "candidate limit reached"
+                    break
                 messages.append({"role": "assistant", "content": response_text})
                 messages.append({"role": "user", "content": feedback})
                 continue
 
             fb_list: List[int] = []
             tries += 1
-            validation = services.validate_patch(candidate.patch, project, json_file, all_single_function_flag, fb_list)
+            validation = validate_candidate_patch(candidate.patch, candidate_args, context, project, json_file, all_single_function_flag, fb_list, services)
             candidate.feedback_codes = list(fb_list)
             candidate.plausible = validation == ""
             candidate.validation_feedback = "plausible patch" if candidate.plausible else validation
@@ -141,13 +168,29 @@ def run_agent_repair(
                 reason = "plausible patch found"
                 break
 
+            if len(candidates) >= config.top_patches:
+                reason = "candidate limit reached"
+                break
+
             messages.append({"role": "assistant", "content": response_text})
             messages.append({"role": "user", "content": build_patch_feedback(candidate, config.observation_max_chars)})
             continue
 
         if action.action == "finish":
+            if not plausible_patches:
+                messages.append({"role": "assistant", "content": response_text})
+                messages.append({"role": "user", "content": build_force_patch_prompt(context, original_function, len(candidates))})
+                continue
             reason = str(action.args.get("reason", "agent finished"))
             break
+
+        if force_patch_now:
+            messages.append({"role": "assistant", "content": response_text})
+            messages.append({
+                "role": "user",
+                "content": "Tool action denied because the mandatory patch stage has started. Return a propose_patch JSON action now.",
+            })
+            continue
 
         if tool_calls >= config.max_tool_calls:
             reason = "tool call limit reached"
@@ -228,6 +271,168 @@ def load_original_function(context: BugContext, services: AgentServices) -> str:
         return services.get_buggy_function(context.source_file, context.target_line, context.target_line, "delete")
     except Exception:
         return ""
+
+
+def load_method_for_action(context: BugContext, args: Dict[str, Any]) -> str:
+    path = args.get("path")
+    line = args.get("line")
+    if not path and line is None:
+        return ""
+    try:
+        file_path = resolve_agent_path(context, str(path or context.source_relpath))
+        with open(file_path, "r", encoding="utf-8", errors="replace") as handle:
+            lines = handle.readlines()
+        start, end = find_method_bounds(lines, int(line or context.target_line))
+        return "".join(lines[start - 1:end])
+    except Exception:
+        return ""
+
+
+def resolve_candidate_location(context: BugContext, args: Dict[str, Any], patch: str, fallback_original: str):
+    """Use the patch method name to recover from imprecise or missing line numbers."""
+    current_original = load_method_for_action(context, args) or fallback_original
+    current_name = extract_method_name(extract_method_signature(current_original))
+    patch_signature = extract_method_signature(patch)
+    patch_name = extract_method_name(patch_signature)
+    patch_param_count = count_method_params(patch_signature)
+    if not patch_name or patch_name == current_name:
+        return current_original, args
+
+    search_path = str(args.get("path") or context.source_relpath)
+    try:
+        file_path = resolve_agent_path(context, search_path)
+        line = find_method_line_by_name(file_path, patch_name, patch_param_count)
+        if line is None:
+            return current_original, args
+        relocated_args = dict(args)
+        relocated_args["path"] = os.path.relpath(file_path, context.bug_dir)
+        relocated_args["line"] = line
+        relocated_args["mode"] = "replace_method"
+        relocated_original = load_method_for_action(context, relocated_args)
+        return relocated_original or current_original, relocated_args
+    except Exception:
+        return current_original, args
+
+
+def validate_candidate_patch(
+    patch: str,
+    args: Dict[str, Any],
+    context: BugContext,
+    project: str,
+    json_file: str,
+    all_single_function_flag: bool,
+    fb_list: List[int],
+    services: AgentServices,
+) -> str:
+    if args.get("path") or args.get("line"):
+        return validate_dynamic_method_patch(patch, args, context, fb_list, services)
+    return services.validate_patch(patch, project, json_file, all_single_function_flag, fb_list)
+
+
+def validate_dynamic_method_patch(
+    patch: str,
+    args: Dict[str, Any],
+    context: BugContext,
+    fb_list: List[int],
+    services: AgentServices,
+) -> str:
+    try:
+        file_path = resolve_agent_path(context, str(args.get("path") or context.source_relpath))
+        line = int(args.get("line") or context.target_line)
+    except Exception as exc:
+        fb_list.append(2)
+        return f"The proposed edit location is invalid: {exc}"
+
+    if not os.path.isfile(file_path):
+        fb_list.append(2)
+        return f"The proposed edit path is not a file: {file_path}"
+
+    with open(file_path, "r", encoding="utf-8", errors="replace") as handle:
+        original = handle.read()
+    lines = original.splitlines(keepends=True)
+    try:
+        start, end = find_method_bounds(lines, line)
+    except Exception as exc:
+        fb_list.append(2)
+        return f"Unable to locate method for proposed edit line {line}: {exc}"
+
+    replacement = patch.rstrip() + "\n"
+    try:
+        new_lines = lines[:start - 1] + [replacement] + lines[end:]
+        with open(file_path, "w", encoding="utf-8") as handle:
+            handle.writelines(new_lines)
+        return services.construct_feedback_after_validate(context.project, context.bug_no, fb_list)
+    finally:
+        with open(file_path, "w", encoding="utf-8") as handle:
+            handle.write(original)
+
+
+def resolve_agent_path(context: BugContext, user_path: str) -> str:
+    if os.path.isabs(user_path):
+        candidate = user_path
+    else:
+        candidate = os.path.join(context.bug_dir, user_path)
+    candidate = os.path.abspath(candidate)
+    bug_dir = os.path.abspath(context.bug_dir)
+    if candidate != bug_dir and not candidate.startswith(bug_dir + os.sep):
+        raise ValueError("path escapes bug workspace")
+    return candidate
+
+
+def find_method_bounds(lines: List[str], line_no: int):
+    idx = min(max(line_no - 1, 0), len(lines) - 1)
+    start = None
+    for current in range(idx, -1, -1):
+        if looks_like_method_declaration(lines[current]):
+            start = current + 1
+            break
+    if start is None:
+        raise ValueError("method declaration not found")
+
+    depth = 0
+    started = False
+    for current in range(start - 1, len(lines)):
+        depth += lines[current].count("{") - lines[current].count("}")
+        if "{" in lines[current]:
+            started = True
+        if started and depth <= 0:
+            return start, current + 1
+    raise ValueError("method end not found")
+
+
+def looks_like_method_declaration(line: str) -> bool:
+    stripped = line.strip()
+    if "(" not in stripped or stripped.startswith(("if ", "for ", "while ", "switch ", "catch ")):
+        return False
+    return bool(re.search(r"\b(public|private|protected|static|final|synchronized)\b.*\w+\s*\(", stripped))
+
+
+def find_method_line_by_name(file_path: str, method_name: str, param_count):
+    with open(file_path, "r", encoding="utf-8", errors="replace") as handle:
+        lines = handle.readlines()
+    for idx in range(len(lines)):
+        if method_name + "(" not in lines[idx]:
+            continue
+        try:
+            start, _ = find_method_bounds(lines, idx + 1)
+        except Exception:
+            continue
+        signature = collect_signature(lines, start)
+        if extract_method_name(signature) != method_name:
+            continue
+        if param_count is not None and count_method_params(signature) != param_count:
+            continue
+        return start
+    return None
+
+
+def collect_signature(lines: List[str], start_line: int) -> str:
+    captured = []
+    for line in lines[start_line - 1:]:
+        captured.append(line.strip())
+        if "{" in line:
+            break
+    return " ".join(captured).split("{", 1)[0].strip()
 
 
 def call_agent_model(client: OpenAI, messages: List[Dict[str, str]], services: AgentServices) -> str:

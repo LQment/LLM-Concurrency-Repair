@@ -9,6 +9,7 @@ class AgentConfig:
     observation_max_chars: int
     trace_max_chars: int
     top_patches: int
+    force_patch_after: int
 
 
 @dataclass

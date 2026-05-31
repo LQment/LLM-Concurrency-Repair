@@ -207,9 +207,10 @@ API_MAX_RETRIES = int(os.environ.get("CHATREPAIR_API_MAX_RETRIES", "3"))
 # ============================================================
 # V3 AgentRepair 配置
 # ============================================================
-AGENT_MAX_STEPS = max(1, int(os.environ.get("CHATREPAIR_AGENT_MAX_STEPS", "12")))
+AGENT_MAX_STEPS = max(1, int(os.environ.get("CHATREPAIR_AGENT_MAX_STEPS", "14")))
 AGENT_MAX_TOOL_CALLS = max(1, int(os.environ.get("CHATREPAIR_AGENT_MAX_TOOL_CALLS", "20")))
 AGENT_OBSERVATION_MAX_CHARS = max(500, int(os.environ.get("CHATREPAIR_AGENT_OBS_MAX_CHARS", "5000")))
 AGENT_TRACE_MAX_CHARS = max(1000, int(os.environ.get("CHATREPAIR_AGENT_TRACE_MAX_CHARS", "12000")))
-AGENT_TOP_PATCHES = max(1, int(os.environ.get("CHATREPAIR_AGENT_TOP_PATCHES", "3")))
+AGENT_TOP_PATCHES = max(1, int(os.environ.get("CHATREPAIR_AGENT_TOP_PATCHES", "4")))
+AGENT_FORCE_PATCH_AFTER = max(1, int(os.environ.get("CHATREPAIR_AGENT_FORCE_PATCH_AFTER", "7")))
 AGENT_DEFAULT_MODE = os.environ.get("CHATREPAIR_AGENT_DEFAULT_MODE", "single-function")

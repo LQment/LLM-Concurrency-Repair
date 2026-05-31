@@ -215,6 +215,7 @@ def go_agent_repair(project, all_single_function_flag, bug_no=None):
         ensure_failing_tests_file=ensure_failing_tests_file,
         get_failure_test_info=get_failure_test_info,
         validate_patch=validate_patch,
+        construct_feedback_after_validate=construct_feedback_after_validate,
         diff_buggy_and_newlist=diff_buggy_and_newlist,
         get_buggy_function=get_buggy_function,
         run_command=run_command,
